@@ -1,0 +1,15 @@
+.dub
+docs.json
+__dummy.html
+docs/
+/symlinkd
+symlinkd.so
+symlinkd.dylib
+symlinkd.dll
+symlinkd.a
+symlinkd.lib
+symlinkd-test-*
+*.exe
+*.o
+*.obj
+*.lst
