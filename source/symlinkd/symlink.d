@@ -114,7 +114,7 @@ if (isInputRange!R && !isInfinite!R && isSomeChar!(ElementEncodingType!R) || isC
 {
 	version (Posix)
 	{
-		import std.file : readLink;
+		import std.file;
 		return std.file.readLink(link);
 	}
 	else version (Windows)
