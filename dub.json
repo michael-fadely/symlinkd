@@ -2,7 +2,7 @@
 	"authors": [
 		"Michael Fadely"
 	],
-	"copyright": "Copyright © 2019, Michael Fadely",
+	"copyright": "Copyright © 2022, Michael Fadely",
 	"description": "Portable symbolic link management.",
 	"license": "MIT",
 	"name": "symlinkd",
