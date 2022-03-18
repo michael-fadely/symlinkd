@@ -6,19 +6,40 @@ import std.traits;
 
 version (Windows)
 {
-	import core.sys.windows.windows;
-	
-	import std.internal.cstring : tempCString;
+	version (ANSI) {} else version = Unicode;
 
-	import std.conv : to;
-	import std.file : FileException;
-	import std.path : isRooted;
-	import std.string : startsWith;
+	import core.sys.windows.windows;
+
+	import std.conv             : to;
+	import std.file             : FileException;
+	import std.internal.cstring : tempCString;
+	import std.path             : isRooted;
+	import std.string           : startsWith, fromStringz;
+	import std.windows.syserror;
 
 	import symlinkd.windows;
 
-	// TODO: actual support for Unicode (*W) functions?
+	// From std.file.d:
+	// Character type used for operating system filesystem APIs
+	private alias FSChar = WCHAR;       // WCHAR can be aliased to wchar or wchar_t
+
 	private enum prefix = `\\?\`;
+
+	// Avoid MAX_PATH issues by automatically prepending `\\?\`
+	private auto asPrefixed(PathT)(PathT path)
+	if (isInputRange!PathT && !isInfinite!PathT && isSomeChar!(ElementEncodingType!PathT))
+	{
+		if (path.isRooted && !path.startsWith(prefix))
+		{
+			// Windows API does not automatically replace '/' with '\'
+			// when the prefix is present. .replace will do the right
+			// thing and not allocate a copy of the string unless a
+			// replacement actually occurs.
+			return (prefix ~ path).replace(`/`, `\`);
+		}
+
+		return path;
+	}
 }
 
 /// Specifies the type of a symlink's target.
@@ -42,22 +63,17 @@ alias SymlinkCreateUnprivileged = Flag!"SymlinkCreateUnprivileged";
 		                    Allows creation of symbolic links without administrative privileges.
 		                    Developer Mode must be enabled on the system for it to function.
 
-	Returns: `true` on success.
-
 	See_Also: SymlinkTargetType
 */
-bool createSymlink(TargetT, LinkT)(TargetT target, LinkT link, SymlinkTargetType targetType,
+void createSymlink(TargetT, LinkT)(TargetT target, LinkT link, SymlinkTargetType targetType,
                                    SymlinkCreateUnprivileged allowUnprivileged = SymlinkCreateUnprivileged.no)
-	if ((isInputRange!TargetT && !isInfinite!TargetT &&
-	     isSomeChar!(ElementEncodingType!TargetT) || isConvertibleToString!TargetT) &&
-		(isInputRange!LinkT && !isInfinite!LinkT && isSomeChar!(ElementEncodingType!LinkT) ||
-		 isConvertibleToString!LinkT))
+if ((isInputRange!TargetT && !isInfinite!TargetT && isSomeChar!(ElementEncodingType!TargetT) || isConvertibleToString!TargetT) &&
+    (isInputRange!LinkT && !isInfinite!LinkT && isSomeChar!(ElementEncodingType!LinkT) || isConvertibleToString!LinkT))
 {
 	version (Posix)
 	{
 		import std.file : symlink;
 		symlink(target, link);
-		return true;
 	}
 	else version (Windows)
 	{
@@ -65,7 +81,7 @@ bool createSymlink(TargetT, LinkT)(TargetT target, LinkT link, SymlinkTargetType
 		{
 			import std.meta : staticMap;
 			alias Types = staticMap!(convertToString, TargetT, LinkT);
-			return symlink!Types(original, link);
+			createSymlink!Types(original, link);
 		}
 		else
 		{
@@ -81,14 +97,10 @@ bool createSymlink(TargetT, LinkT)(TargetT target, LinkT link, SymlinkTargetType
 				flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
 			}
 
-			// avoid MAX_PATH issues
-			auto target_ = target.isRooted && !target.startsWith(prefix) ? prefix ~ target : target;
-			auto link_   = link.isRooted && !link.startsWith(prefix) ? prefix ~ link : link;
+			auto tz = target.asPrefixed().tempCString!(FSChar)();
+			auto lz = link.asPrefixed().tempCString!(FSChar)();
 
-			auto tz = target_.tempCString();
-			auto lz = link_.tempCString();
-
-			return !!CreateSymbolicLinkA(lz, tz, flags);
+			wenforce(CreateSymbolicLinkW(lz, tz, flags), "CreateSymbolicLinkW failed");
 		}
 	}
 	else
@@ -125,28 +137,34 @@ if (isInputRange!R && !isInfinite!R && isSomeChar!(ElementEncodingType!R) || isC
 		}
 		else
 		{
-			auto strz = link.tempCString;
-			auto handle = CreateFileA(strz, FILE_READ_EA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, null,
-			                          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, null);
+			auto strz = link.asPrefixed().tempCString!(FSChar)();
 
-			scope (exit) CloseHandle(handle);
+			auto handle = CreateFileW(strz,
+			                          FILE_READ_EA,
+			                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			                          null,
+			                          OPEN_EXISTING,
+			                          FILE_FLAG_BACKUP_SEMANTICS,
+			                          null);
 
-			if (handle == INVALID_HANDLE_VALUE)
+			scope (exit)
 			{
-				throw new FileException(link, "Unable to open file.");
+				if (handle != INVALID_HANDLE_VALUE)
+				{
+					CloseHandle(handle);
+				}
 			}
 
-			const requiredLength = GetFinalPathNameByHandleA(handle, null, 0, 0);
+			wenforce(handle != INVALID_HANDLE_VALUE, "CreateFileW failed");
 
-			if (requiredLength < 1)
-			{
-				return null;
-			}
+			const requiredLength = GetFinalPathNameByHandleW(handle, null, 0, 0);
+			wenforce(requiredLength > 0, "GetFinalPathNameByHandleW failed");
 
-			auto buffer = new char[requiredLength + 1];
-			GetFinalPathNameByHandleA(handle, buffer.ptr, cast(uint)buffer.length, 0);
+			auto buffer = new FSChar[requiredLength + 1];
+			GetFinalPathNameByHandleW(handle, buffer.ptr, cast(uint)buffer.length, 0);
+			wenforce(requiredLength > 0, "GetFinalPathNameByHandleW failed");
 
-			auto result = to!string(buffer);
+			string result = buffer.fromStringz().to!string();
 
 			if (stripPrefix && result.startsWith(prefix))
 			{
@@ -162,8 +180,5 @@ if (isInputRange!R && !isInfinite!R && isSomeChar!(ElementEncodingType!R) || isC
 	}
 }
 
-// version (symlinkd_aliases)
-// {
-	public alias symlink  = createSymlink;
-	public alias readLink = readSymlink;
-// }
+public alias symlink  = createSymlink;
+public alias readLink = readSymlink;
